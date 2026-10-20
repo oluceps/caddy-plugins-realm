@@ -1,4 +1,4 @@
-module github.com/oluoceps/caddy-plugins/srv
+module github.com/oluceps/caddy-plugins-realm/srv
 
 go 1.25.1
 

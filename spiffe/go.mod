@@ -1,4 +1,4 @@
-module github.com/oluoceps/caddy-plugins/spiffe
+module github.com/oluceps/caddy-plugins-realm/spiffe
 
 go 1.25.1
 

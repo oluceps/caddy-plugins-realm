@@ -8,8 +8,8 @@ Two independent Go modules, one per plugin:
 
 | Directory | Module | Caddy modules |
 |---|---|---|
-| `srv/` | `github.com/oluoceps/caddy-plugins/srv` | `layer4.handlers.srv_proxy` |
-| `spiffe/` | `github.com/oluoceps/caddy-plugins/spiffe` | `tls.get_certificate.spiffe`, `tls.ca_pool.source.spiffe` |
+| `srv/` | `github.com/oluceps/caddy-plugins-realm/srv` | `layer4.handlers.srv_proxy` |
+| `spiffe/` | `github.com/oluceps/caddy-plugins-realm/spiffe` | `tls.get_certificate.spiffe`, `tls.ca_pool.source.spiffe` |
 
 ## Why a separate repository
 
@@ -28,8 +28,8 @@ Referencing a published module keeps the derivation reproducible on any machine.
 ```nix
 pkgs.caddy.withPlugins {
   plugins = [
-    "github.com/oluoceps/caddy-plugins/srv@v0.1.0"
-    "github.com/oluoceps/caddy-plugins/spiffe@v0.1.0"
+    "github.com/oluceps/caddy-plugins-realm/srv@v0.1.0"
+    "github.com/oluceps/caddy-plugins-realm/spiffe@v0.1.0"
   ];
   hash = "sha256-…";
 }
@@ -48,7 +48,7 @@ git push origin main --tags
 Between releases, a commit hash works too and needs no tag:
 
 ```sh
-go list -m github.com/oluoceps/caddy-plugins/spiffe@<commit>
+go list -m github.com/oluceps/caddy-plugins-realm/spiffe@<commit>
 # → v0.0.0-20260101120000-<commit>
 ```
 
