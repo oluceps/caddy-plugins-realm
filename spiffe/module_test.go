@@ -28,7 +28,7 @@ func TestModuleContract(t *testing.T) {
 func TestEmptyTrustBundleIsAnEmptyPool(t *testing.T) {
 	// A pool without a connected client must be empty, never nil: Caddy assigns
 	// it to `tls.Config.ClientCAs` and a nil pool would mean "trust everything".
-	pool := TrustBundle{}.CertPool()
+	pool := (&TrustBundle{}).CertPool()
 	if pool == nil {
 		t.Fatal("CertPool returned nil")
 	}

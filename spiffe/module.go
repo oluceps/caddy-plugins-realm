@@ -19,11 +19,12 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"time"
+	"sync"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddytls"
 	"github.com/caddyserver/certmagic"
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 )
@@ -101,13 +102,15 @@ func (s SVIDSource) GetCertificate(_ context.Context, _ *tls.ClientHelloInfo) (*
 
 // TrustBundle provides the current SPIFFE trust bundle as a client CA pool.
 //
-// Caddy builds the pool once per configuration, so a CA rotation is picked up on
-// the next reload. That is coarser than SVID rotation, which needs no reload.
+// Caddy asks for the pool while building each handshake configuration. The
+// source keeps the Workload API update stream open, so each call returns the
+// bundle currently held by the Agent.
 type TrustBundle struct {
 	// Workload API socket. Defaults to the SPIRE Agent's public socket.
 	SocketPath string `json:"socket_path,omitempty"`
 
-	client *workloadapi.Client
+	mu      sync.RWMutex
+	bundles *x509bundle.Set
 }
 
 // CaddyModule implements caddy.Module.
@@ -118,7 +121,7 @@ func (TrustBundle) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-// Provision connects to the workload API.
+// Provision opens the workload API update stream and waits for its first bundle.
 func (b *TrustBundle) Provision(ctx caddy.Context) error {
 	socketPath := b.SocketPath
 	if socketPath == "" {
@@ -128,24 +131,55 @@ func (b *TrustBundle) Provision(ctx caddy.Context) error {
 	if err != nil {
 		return fmt.Errorf("connect to the SPIFFE workload API at %s: %w", socketPath, err)
 	}
-	b.client = client
-	ctx.OnCancel(func() { _ = client.Close() })
+
+	watchCtx, cancel := context.WithCancel(context.Background())
+	ctx.OnCancel(func() {
+		cancel()
+		_ = client.Close()
+	})
+
+	ready := make(chan error, 1)
+	go func() {
+		err := client.WatchX509Bundles(watchCtx, bundleWatcher{bundle: b, ready: ready})
+		if watchCtx.Err() == nil {
+			b.mu.Lock()
+			b.bundles = nil
+			b.mu.Unlock()
+		}
+		if err != nil && watchCtx.Err() == nil {
+			select {
+			case ready <- err:
+			default:
+			}
+		}
+	}()
+
+	select {
+	case err := <-ready:
+		if err != nil {
+			cancel()
+			_ = client.Close()
+			return fmt.Errorf("watch SPIFFE trust bundles: %w", err)
+		}
+	case <-ctx.Done():
+		cancel()
+		_ = client.Close()
+		return ctx.Err()
+	}
 	return nil
 }
 
-// CertPool returns the trust bundle as a certificate pool.
+// CertPool copies the trust bundle currently held by the update watcher.
 //
-// The pool is built once per configuration, so a trust domain CA rotation is
-// picked up on the next reload. SVID rotation needs no reload.
-func (b TrustBundle) CertPool() *x509.CertPool {
+// Caddy calls this while building a handshake configuration, so a rotated CA is
+// used by the next handshake. An unavailable watcher returns an empty pool,
+// which rejects clients instead of trusting every certificate.
+func (b *TrustBundle) CertPool() *x509.CertPool {
 	pool := x509.NewCertPool()
-	if b.client == nil {
-		return pool
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	bundles, err := b.client.FetchX509Bundles(ctx)
-	if err != nil {
+	b.mu.RLock()
+	bundles := b.bundles
+	b.mu.RUnlock()
+	if bundles == nil {
 		return pool
 	}
 	for _, bundle := range bundles.Bundles() {
@@ -154,6 +188,31 @@ func (b TrustBundle) CertPool() *x509.CertPool {
 		}
 	}
 	return pool
+}
+
+// bundleWatcher stores each trust bundle update and reports the first one.
+type bundleWatcher struct {
+	bundle *TrustBundle
+	ready  chan<- error
+}
+
+// OnX509BundlesUpdate replaces the cached bundle set.
+func (w bundleWatcher) OnX509BundlesUpdate(bundles *x509bundle.Set) {
+	w.bundle.mu.Lock()
+	w.bundle.bundles = bundles
+	w.bundle.mu.Unlock()
+	select {
+	case w.ready <- nil:
+	default:
+	}
+}
+
+// OnX509BundlesWatchError reports a failure before the first bundle arrives.
+func (w bundleWatcher) OnX509BundlesWatchError(err error) {
+	select {
+	case w.ready <- err:
+	default:
+	}
 }
 
 // newX509Source connects to the agent and keeps the SVID stream open.
