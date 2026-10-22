@@ -1,71 +1,100 @@
 # caddy-plugins
 
-Caddy modules used by the `realm` NixOS configuration. They live here, in their
-own repository, so `caddy.withPlugins` can reference them through the Go module
-proxy instead of injecting a local store path into a fixed-output derivation.
+SPIFFE modules for the Realm NixOS configuration. They use Caddy's public
+extension interfaces and require no Caddy source patch.
 
-Two independent Go modules, one per plugin:
+The `spiffe/` Go module registers two Caddy modules:
 
-| Directory | Module | Caddy modules |
-|---|---|---|
-| `srv/` | `github.com/oluceps/caddy-plugins-realm/srv` | `layer4.handlers.srv_proxy` |
-| `spiffe/` | `github.com/oluceps/caddy-plugins-realm/spiffe` | `tls.get_certificate.spiffe`, `tls.ca_pool.source.spiffe` |
+| Module | Purpose |
+|---|---|
+| `tls.get_certificate.spiffe` | Serve the current X.509-SVID from the SPIRE Agent. |
+| `tls.client_auth.verifier.spiffe` | Verify client SVIDs against current trust bundles and an exact identity allowlist. |
 
-## Why a separate repository
+## Client authentication
 
-`caddy.withPlugins` turns its plugin list into `xcaddy --with MODULE@VERSION`
-inside a fixed-output derivation. A local `file://` or store-path plugin makes
-that derivation reference a store path, which Nix rejects:
+Use the verifier with `client_authentication.mode = "require"`. Caddy requires
+a client certificate, and the verifier performs certificate verification and
+authorization. Do not configure a separate `ca` or `trust_pool` for this policy.
+Those settings use Caddy's CA pool snapshot and can reject a rotated CA before
+the verifier runs.
 
-```
-error: the fixed-output derivation '…' must not reference store paths but 1 such reference was found
-```
-
-Referencing a published module keeps the derivation reproducible on any machine.
-
-## Consuming a module
-
-```nix
-pkgs.caddy.withPlugins {
-  plugins = [
-    "github.com/oluceps/caddy-plugins-realm/srv@v0.1.0"
-    "github.com/oluceps/caddy-plugins-realm/spiffe@v0.1.0"
-  ];
-  hash = "sha256-…";
+```json
+{
+  "client_authentication": {
+    "mode": "require",
+    "verifiers": [
+      {
+        "verifier": "spiffe",
+        "socket_path": "/run/spire/agent/public/api.sock",
+        "allowed_ids": ["spiffe://nyaw.xyz/service/vmagent"]
+      }
+    ]
+  }
 }
 ```
 
-## Releasing
+`allowed_ids` must contain at least one valid, exact SPIFFE ID. Wildcards are
+not supported. The verifier rejects missing certificates, invalid SVIDs,
+untrusted chains, expired certificates, and identities outside this list.
+It also checks the client-auth purpose throughout the certificate chain.
+The verifier does not trust a SPIFFE URI without a valid certificate chain.
 
-Go resolves a module in a subdirectory from a tag named after that directory:
+The verifier reads the current trust bundle for every connection. It uses one
+bundle snapshot for both SVID and client-auth verification. Removed CAs stop
+validating new connections. Existing connections keep their established TLS
+session until they close. Caddy invokes the verifier through `VerifyConnection`.
 
-```sh
-git tag srv/v0.1.0
-git tag spiffe/v0.1.0
-git push origin main --tags
+The server certificate module keeps its existing configuration:
+
+```json
+{
+  "get_certificate": [
+    {
+      "via": "spiffe",
+      "socket_path": "/run/spire/agent/public/api.sock",
+      "spiffe_id": "spiffe://nyaw.xyz/service/observability-eihort"
+    }
+  ]
+}
 ```
 
-Between releases, a commit hash works too and needs no tag:
+Both modules use the local SPIRE Workload API. Keys remain in memory. The
+identity and trust-bundle streams update without a Caddy reload.
+
+## Migration
+
+The SRV proxy module was removed because Realm connects directly to catalog
+endpoints. The old `tls.ca_pool.source.spiffe` module was replaced by the client
+verifier. Replace `mode = "require_and_verify"` and `ca.provider = "spiffe"`
+with the verifier policy above before upgrading the plugin.
+
+After all listeners use the verifier, remove the Caddy CA rotation patch and
+its build-time test injection. Keep the HTTP path, method, and query policies.
+
+## Published builds
+
+`caddy.withPlugins` fetches plugins inside a fixed-output derivation. Use a
+published Go module version or commit. A local checkout inside that derivation
+creates a Nix store reference and prevents a reproducible fixed-output build.
+
+For a release of the subdirectory module:
 
 ```sh
-go list -m github.com/oluceps/caddy-plugins-realm/spiffe@<commit>
-# → v0.0.0-20260101120000-<commit>
+git tag spiffe/v0.2.0
+git push origin main spiffe/v0.2.0
 ```
 
-`caddy.withPlugins` accepts pseudo-versions: it only requires an `@` in each
-entry.
-
-The first fetch after a push may need a moment before `proxy.golang.org` and
-`sum.golang.org` have indexed the new version. If a build fails with "unknown
-revision", retry after a minute.
+Then use `github.com/oluceps/caddy-plugins-realm/spiffe@v0.2.0` in the Nix plugin
+list and update its dependency hash. Between releases, resolve a published
+commit with `go list -m` and use the resulting pseudo-version.
 
 ## Development
 
 ```sh
-(cd srv && go test -race ./...)
-(cd spiffe && go test -race ./...)
+cd spiffe
+go test -race -count=1 ./...
+go vet ./...
 ```
 
-`srv/` covers SRV priority/weight selection, UDP-to-TCP fallback, address
-refresh and stream teardown. `spiffe/` covers the module IDs and the empty trust
-pool guarantee; its Workload API paths need a live SPIRE Agent.
+The tests use generated certificates and local TLS connections. They do not
+need production credentials.
